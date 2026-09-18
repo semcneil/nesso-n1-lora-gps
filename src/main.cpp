@@ -14,8 +14,11 @@
 
 #include <Arduino_Nesso_N1.h>
 #include <RadioLib.h>
+#include <Adafruit_GPS.h>
+#include <esp_mac.h>  // to get the full 8-byte MAC address
 
 #define GPSSerial Serial1
+Adafruit_GPS GPS(&GPSSerial);
 
 void renderstatusSprite();
 
@@ -31,7 +34,7 @@ void renderstatusSprite();
 NessoBattery battery;
 NessoDisplay display;
 
-#define XMT_PERIOD 5000  // ms between transmitting packets
+#define XMT_PERIOD 60000  // ms between transmitting packets
 const int DISPLAY_WIDTH = 240;
 const int DISPLAY_HEIGHT = 135;
 const uint16_t COLOR_TEAL = 0x0410;
@@ -76,6 +79,24 @@ bool progressExpanding = true;
 void setFlag(void) {
   receivedFlag = true;
 }
+// Allocate an 8-byte array for the EUI-64 / IEEE 802.15.4 ID
+uint8_t mac8[8];
+String globalDeviceId = "ID NOT SET";
+
+// Function that fetches the 8-byte ID and returns it as a formatted String
+String getUniqueIdString() {
+  uint8_t mac8[8];
+  char buffer[24]; // Big enough to hold "XX:XX:XX:XX:XX:XX:XX:XX\0"
+  
+  if (esp_read_mac(mac8, ESP_MAC_IEEE802154) == ESP_OK) {
+    snprintf(buffer, sizeof(buffer), "%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+             mac8[0], mac8[1], mac8[2], mac8[3], 
+             mac8[4], mac8[5], mac8[6], mac8[7]);
+    return String(buffer);
+  }
+  
+  return String("ERROR_READING_ID");
+}
 
 void setup() {
   Serial.begin(115200);
@@ -105,6 +126,9 @@ void setup() {
 
   Serial.println("Starting...");
   lastLEDflip = millis();
+
+  globalDeviceId = getUniqueIdString();
+  Serial.println("ID: " + globalDeviceId);
 
   // Enable the SX1262 module
   pinMode(LORA_ENABLE, OUTPUT);
@@ -163,10 +187,17 @@ void setup() {
   Serial.print(IMU.gyroscopeSampleRate());
   Serial.println(" Hz");
 
-  // 9600 baud is the default rate
+  // 9600 baud is the default rate for the Ultimate GPS
   GPSSerial.begin(9600, SERIAL_8N1, GROVE_IO_0);
+  
+  // Initialize the GPS
+  if(!GPS.begin(9600)) {
+    Serial.println("!!!!! GPS FAILED TO INITIALIZE !!!!!");
+  }
+  delay(1000);  // wait for GPS to start (might not be needed)
 }
 
+String GPSDataString = "";
 bool doXmt = false;
 void loop() {
   static bool doBeep = false;
@@ -181,21 +212,56 @@ void loop() {
   uint8_t curKey2 = digitalRead(KEY2);
   uint8_t curPwrIn = digitalRead(VIN_DETECT);
 
-  while(GPSSerial.available()) {
-    char c = GPSSerial.read();
-    Serial.write(c);
+  while(GPS.available()) {
+    GPS.read();
+    // Serial.print(GPS.read());
   }
+  // Serial.println();
+
+  if (GPS.newNMEAreceived()) {
+    // a tricky thing here is if we print the NMEA sentence, or data
+    // we end up not listening and catching other sentences!
+    // so be very wary if using OUTPUT_ALLDATA and trying to print out data
+    Serial.print(GPS.lastNMEA()); // this also sets the newNMEAreceived() flag to false
+    if(GPS.parse(GPS.lastNMEA()) && GPS.fix) {
+      GPSDataString = GPS.year;
+      GPSDataString += "-";
+      GPSDataString += GPS.month;
+      GPSDataString += "-";
+      GPSDataString += GPS.day;
+      GPSDataString += " ";
+      GPSDataString += GPS.hour;
+      GPSDataString += ":";
+      GPSDataString += GPS.minute;
+      GPSDataString += ":";
+      GPSDataString += GPS.seconds;
+      GPSDataString += ",";
+      GPSDataString += GPS.satellites;
+      GPSDataString += ",";
+      GPSDataString += String(GPS.latitudeDegrees, 10);
+      GPSDataString += ",";
+      GPSDataString += String(GPS.longitudeDegrees, 10);
+      Serial.println(GPSDataString);
+    }
+    // if (!GPS.parse(GPS.lastNMEA())) // this also sets the newNMEAreceived() flag to false
+    //   return; // we can fail to parse a sentence in which case we should just wait for another
+  }
+  // while(GPSSerial.available()) {
+  //   char c = GPSSerial.read();
+  //   Serial.write(c);
+  // }
 
   if (IMU.accelerationAvailable() && IMU.gyroscopeAvailable()) {
     IMU.readAcceleration(ax, ay, az);
     IMU.readGyroscope(gx, gy, gz);
 
-   if(ay > 0.0) {
+    if(ay > 0.1) {
       display.setRotation(3);
-    } else {
+    } 
+    if(ay < -0.1) {
       display.setRotation(1);
     }
-}
+  }
 
   if(curKey1 != lastKey1 && !curKey1) {
     Serial.println("KEY1 pressed");
@@ -277,10 +343,18 @@ void loop() {
     Serial.println(uptimeString);
 
     if(doXmt) {
+      int state;
       Serial.print(F("[SX1262] Transmitting packet... "));
-      // Create a packet with a counter
-      String packet = modName + " #" + String(packetCounter++);
-      int state = radio.transmit(packet);
+      char batteryString[7];
+      sprintf(batteryString, "%4.2fV", batteryVoltage);
+      String xmtStr = "Nesso," + globalDeviceId + "," + String(batteryString);
+      if(GPSDataString.length() > 0) {
+        state = radio.transmit(xmtStr + "," + GPSDataString);
+      } else {
+        // Create a packet with a counter
+        String packet = xmtStr + ",#" + String(packetCounter++);
+        state = radio.transmit(packet);
+      }
 
       if (state == RADIOLIB_ERR_NONE) {
         Serial.println(F("success!"));

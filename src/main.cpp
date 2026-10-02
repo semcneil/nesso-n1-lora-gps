@@ -16,6 +16,8 @@
 #include <RadioLib.h>
 #include <Adafruit_GPS.h>
 #include <esp_mac.h>  // to get the full 8-byte MAC address
+#include <ArduinoJson.h> // JSON library
+#include "secrets.h"  // MOD_NAME and such
 
 #define GPSSerial Serial1
 Adafruit_GPS GPS(&GPSSerial);
@@ -34,7 +36,6 @@ void renderstatusSprite();
 NessoBattery battery;
 NessoDisplay display;
 
-#define XMT_PERIOD 60000  // ms between transmitting packets
 const int DISPLAY_WIDTH = 240;
 const int DISPLAY_HEIGHT = 135;
 const uint16_t COLOR_TEAL = 0x0410;
@@ -49,6 +50,7 @@ const int ROWS = 1;
 const int REGION_WIDTH = 12;
 const int REGION_HEIGHT = 135;
 const float LORA_FREQUENCY = 915.0; // Set the LoRa® frequency based on your region
+bool display_on = false;
 
 // Initialize the radio module, passing RADIOLIB_NC for the reset pin.
 // The reset will be handled manually.
@@ -125,7 +127,6 @@ void setup() {
   // pinMode(KEY2, INPUT);
 
   Serial.println("Starting...");
-  lastLEDflip = millis();
 
   globalDeviceId = getUniqueIdString();
   Serial.println("ID: " + globalDeviceId);
@@ -189,16 +190,19 @@ void setup() {
 
   // 9600 baud is the default rate for the Ultimate GPS
   GPSSerial.begin(9600, SERIAL_8N1, GROVE_IO_0);
+  // CANNOT SEND TO GPS SINCE OTHER PIN USED AS PPS
   
   // Initialize the GPS
   if(!GPS.begin(9600)) {
     Serial.println("!!!!! GPS FAILED TO INITIALIZE !!!!!");
   }
-  delay(1000);  // wait for GPS to start (might not be needed)
+  Serial.println("Pausing to let GPS start");
+  delay(1000);
+  display.sleep();
 }
 
 String GPSDataString = "";
-bool doXmt = false;
+bool doXmt = true;
 void loop() {
   static bool doBeep = false;
   unsigned long msNow = millis();
@@ -266,11 +270,21 @@ void loop() {
   if(curKey1 != lastKey1 && !curKey1) {
     Serial.println("KEY1 pressed");
     doXmt = !doXmt;
+    if(doXmt == true) {
+      lastLEDflip = 0; // reset to start with a transmit
+    }
   }
   if(curKey2 != lastKey2 && !curKey2) {
     Serial.println("KEY2 pressed");
-    doBeep = !doBeep;
-    tone(BEEP_PIN, 4000, 400);
+    // doBeep = !doBeep;
+    // tone(BEEP_PIN, 4000, 400);
+    if(display_on) {
+      display.sleep();
+      display_on = false;
+    } else {
+      display.wakeup();
+      display_on = true;
+    } 
   }
   if(curPwrIn != lastPwrIn && !curPwrIn) {
     delay(5000);
@@ -328,11 +342,10 @@ void loop() {
 
   char batteryStatusTicker[16];
   sprintf(batteryStatusTicker, "%4.2f %6.2f%%", batteryVoltage, chargeLevel);
-  if (msNow - lastLEDflip > XMT_PERIOD) {
+  if (msNow - lastLEDflip > XMT_PERIOD || lastLEDflip == 0) {
     ledStatus = !ledStatus;
     // LED_BUILTIN currently disabled for failures
     digitalWrite(LED_BUILTIN, ledStatus);
-    lastLEDflip = msNow;
     Serial.print(batteryVoltage);
     Serial.print(" ");
     Serial.print(chargeLevel);
@@ -343,18 +356,32 @@ void loop() {
     Serial.println(uptimeString);
 
     if(doXmt) {
+      JsonDocument doc;
+      doc["ModName"] = MOD_NAME;
+      doc["MAC"] = globalDeviceId;
+      doc["batVolt"] = batteryVoltage;
+      doc["batPct"] = chargeLevel;
+      doc["pwr"] = battery.getAvgPower();
+      if(lastLEDflip == 0) {
+        doc["boot"] = "true";
+      }
       int state;
       Serial.print(F("[SX1262] Transmitting packet... "));
       char batteryString[7];
       sprintf(batteryString, "%4.2fV", batteryVoltage);
       String xmtStr = "Nesso," + globalDeviceId + "," + String(batteryString);
       if(GPSDataString.length() > 0) {
-        state = radio.transmit(xmtStr + "," + GPSDataString);
+        doc["GPS"] = GPSDataString;
+        // state = radio.transmit(xmtStr + "," + GPSDataString);
       } else {
         // Create a packet with a counter
-        String packet = xmtStr + ",#" + String(packetCounter++);
-        state = radio.transmit(packet);
+        doc["Count"] = packetCounter++;
+        // String packet = xmtStr + ",#" + String(packetCounter++);
+        // state = radio.transmit(packet);
       }
+      String myJSONstr;
+      serializeJson(doc, myJSONstr);
+      state = radio.transmit(myJSONstr, myJSONstr.length());
 
       if (state == RADIOLIB_ERR_NONE) {
         Serial.println(F("success!"));
@@ -364,6 +391,7 @@ void loop() {
       }
     }
 #endif
+    lastLEDflip = msNow;
   }
   renderstatusSprite();
   lastKey1 = curKey1;

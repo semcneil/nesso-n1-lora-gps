@@ -26,13 +26,14 @@ void renderstatusSprite();
 
 #define LORA_XMT 1  // 1 for transmit, 0 for receive
 
-#if defined(LORA_XMT) && (LORA_XMT > 0)
-  String modName = "N1-Xmt";
+String modName = MOD_NAME;
+// #if defined(LORA_XMT) && (LORA_XMT > 0)
+//   String modName = "N1-Xmt";
 
-#else
-  String modName = "N1-Rcv";
+// #else
+//   String modName = "N1-Rcv";
 
-#endif
+// #endif
 NessoBattery battery;
 NessoDisplay display;
 
@@ -50,7 +51,7 @@ const int ROWS = 1;
 const int REGION_WIDTH = 12;
 const int REGION_HEIGHT = 135;
 const float LORA_FREQUENCY = 915.0; // Set the LoRa® frequency based on your region
-bool display_on = false;
+bool display_on = true;
 
 // Initialize the radio module, passing RADIOLIB_NC for the reset pin.
 // The reset will be handled manually.
@@ -198,11 +199,13 @@ void setup() {
   }
   Serial.println("Pausing to let GPS start");
   delay(1000);
-  display.sleep();
+  if(!display_on) {
+    display.sleep();
+  }
 }
 
 String GPSDataString = "";
-bool doXmt = true;
+bool doXmt = false;
 void loop() {
   static bool doBeep = false;
   unsigned long msNow = millis();
@@ -276,15 +279,15 @@ void loop() {
   }
   if(curKey2 != lastKey2 && !curKey2) {
     Serial.println("KEY2 pressed");
-    // doBeep = !doBeep;
-    // tone(BEEP_PIN, 4000, 400);
-    if(display_on) {
-      display.sleep();
-      display_on = false;
-    } else {
-      display.wakeup();
-      display_on = true;
-    } 
+    doBeep = !doBeep;
+    tone(BEEP_PIN, 4000, 400);
+    // if(display_on) {
+    //   display.sleep();
+    //   display_on = false;
+    // } else {
+    //   display.wakeup();
+    //   display_on = true;
+    // } 
   }
   if(curPwrIn != lastPwrIn && !curPwrIn) {
     delay(5000);
@@ -388,6 +391,9 @@ void loop() {
       } else {
         Serial.print(F("failed, code "));
         Serial.println(state);
+      }
+      if(doBeep) {
+        tone(BEEP_PIN, 1000, 400);
       }
     }
 #endif
